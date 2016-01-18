@@ -3,7 +3,8 @@ var util			= require ('util'),
 	urlUtils		= require ('url'),
 	querystring     = require ('querystring'),
 	httpManager     = require ('./http/model-manager'),
-	tough           = require ('tough-cookie');
+	tough           = require ('tough-cookie'),
+	path            = require ('path');
 
 var HTTPClient, HTTPSClient, followRedirects;
 
@@ -13,9 +14,10 @@ var HTTPClient, HTTPSClient, followRedirects;
 // - - - - - - -
 
 var pipeProgress = function (config) {
-	this.bytesTotal = 0;
-	this.bytesPass  = 0; // because bytes can be read and written
-	this.lastLogged = 0;
+	this.bytesToRead  = 0;
+	this.bytesRead    = 0;
+	this.bytesWritten = 0;
+	this.lastLogged   = 0;
 	util.extend (this, config);
 };
 
@@ -23,13 +25,27 @@ pipeProgress.prototype.watch = function () {
 	var self = this;
 	if (this.reader && this.readerWatch) {
 		this.reader.on (this.readerWatch, function (chunk) {
-			self.bytesPass += chunk.length;
+			self.bytesRead += chunk.length;
 		});
 	} else if (this.writer && this.writerWatch) {
 		this.writer.on (this.writerWatch, function (chunk) {
-			self.bytesPass += chunk.length;
+			self.bytesWritten += chunk.length;
 		});
 	}
+
+	var readInterval = setInterval (function () {
+		this.emit ('progress', this.bytesRead, this.bytesToRead);
+	}.bind (this), 500);
+
+	this.reader.on ('end', function () {
+		clearInterval (readInterval);
+		this.emit ('progress', this.bytesRead, this.bytesToRead);
+	});
+
+	this.reader.on ('error', function () {
+		clearInterval (readInterval);
+	});
+
 };
 
 /**
@@ -43,8 +59,6 @@ var httpModel = module.exports = function (modelBase, optionalUrlParams) {
 
 	this.params = {};
 	this.extendParams(this.params, optionalUrlParams, modelBase.url);
-
-	this.headers = {};
 
 	if (this.params.auth) {
 		this.headers.Authorization = 'Basic ' +
@@ -71,6 +85,12 @@ var httpModel = module.exports = function (modelBase, optionalUrlParams) {
 
 	this.redirectCount = 0;
 	this.cookieJar = new tough.CookieJar (null, false);
+
+	if (optionalUrlParams.proxy) {
+		this.proxy = optionalUrlParams.proxy;
+	}
+
+	this.headers = {};
 
 	if (this.params.headers) {
 		try {
@@ -130,8 +150,6 @@ httpModel.prototype.handleBodyData = function () {
 
 util.extend (httpModel.prototype, {
 	DefaultParams: {
-		protocol: 'http:',
-		port: 80,
 		method: 'GET'
 	},
 
@@ -206,18 +224,21 @@ util.extend (httpModel.prototype, {
 
 		// Reformat the merged URL object's compound parts.
 		// Don't reorder the lines below.
-		params.search = urlUtils.format({
+		params.search = params.search || urlUtils.format({
 			query: params.query
 		});
 
-		params.path = urlUtils.format({
+		params.path = params.path || urlUtils.format({
 			pathname: params.pathname,
 			search: params.search
 		});
 
+		params.proxy = configUrlObj.proxy;
+
 		params.href = params.href || urlUtils.format(params);
 
 		params.port = params.port || ((this.params.protocol == 'https:') ? 443 : 80);
+		params.protocol = params.protocol || this.params.protocol;
 
 		return params;
 	},
@@ -230,7 +251,8 @@ util.extend (httpModel.prototype, {
 		if (!this.isStream) target.to.data = new Buffer('');
 
 		this.progress = new pipeProgress ({
-			writer: target.to
+			writer: target.to,
+			emit: this.modelBase.emit.bind (this.modelBase)
 		});
 
 		// add this for watching into httpModelManager
@@ -246,11 +268,27 @@ util.extend (httpModel.prototype, {
 	 * http model needs to return response headers and status code
 	 * @param {Object} result result fields
 	 */
-	addResultFields: function (result) {
-		result.code    = this.res.statusCode || 500;
-		if (result.stopReason === "timeout")
-			result.code = 504;
-		result.headers = (this.res.headers) ? this.res.headers : {};
+	addResultFields: function (result, meta) {
+		if (this.res) {
+			result.url = this.url;
+			result.urlFileName = path.basename (this.url);
+
+			result.code    = this.res.statusCode || 500;
+			if (result.stopReason === "timeout")
+				result.code = 504;
+			result.headers = (this.res.headers) ? this.res.headers : {};
+			return;
+		}
+
+		if (meta) {
+			// got headers and status from cached meta
+			result.code    = meta.code;
+			result.headers = meta.headers;
+			result.url     = meta.url;
+			result.urlFileName = meta.urlFileName;
+			return;
+		}
+
 	},
 	isSuccessResponse: function check () {
 		if (!this.res)
@@ -276,14 +314,27 @@ util.extend (httpModel.prototype, {
 	run: function (params, headers, bodyData) {
 		var self = this;
 
-		var Client = (params.protocol == 'https:') ? HTTPSClient : HTTPClient;
+		var Client = (params.protocol === 'https:') ? HTTPSClient : HTTPClient;
+
+		var requestParams = params;
 
 		var requestUrl = params.href;
+		this.url = requestUrl;
 
-		var req = self.req = Client.request (params, function (res) {
+		if (this.proxy) {
+			requestParams = urlUtils.parse (this.proxy);
+			requestParams.path = params.href;
+			requestParams.headers = {};
+			for (var headerName in headers) {
+				requestParams.headers[headerName] = headers[headerName];
+			}
+			requestParams.headers.host = params.host;
+		}
+
+		var req = self.req = Client.request (requestParams, function (res) {
 
 			self.res = res;
-			res.responseData = new Buffer("");
+			res.responseData = new Buffer (0);
 
 			if (res.headers['set-cookie']) {
 				if (res.headers['set-cookie'].constructor != Array) {
@@ -300,6 +351,9 @@ util.extend (httpModel.prototype, {
 				res.redirected = true;
 				self.run (urlUtils.parse (redirected, true), {});
 				this.redirectCount ++;
+
+				req.end ();
+				return;
 			}
 			// if (res.statusCode != 200) {
 			// 	self.modelBase.emit (
@@ -309,9 +363,8 @@ util.extend (httpModel.prototype, {
 			// 	return;
 			// }
 
-			// TODO: handle redirect
 			util.extend (self.progress, {
-				bytesTotal: res.headers['content-length'],
+				bytesToRead: res.headers['content-length'],
 				reader: res,
 				readerWatch: "data"
 			});
@@ -325,13 +378,16 @@ util.extend (httpModel.prototype, {
 
 			res.on ('error', function (exception) {
 				exception.scope = 'response';
+				if (self.isStream) self.writeStream.end();
 				self.modelBase.emit ('error', exception);
 			});
 
 			// clean data on redirect
 			res.on ('data', function (chunk) {
 				if (!self.isStream)
-					res.responseData += chunk;
+					res.responseData.length === 0
+						? res.responseData = chunk
+						: res.responseData = Buffer.concat ([res.responseData, chunk]);
 				self.modelBase.emit ('data', chunk);
 			});
 
@@ -399,6 +455,6 @@ util.extend (httpModel.prototype, {
 		if (reason)
 			this.stopReason = reason;
 		if (this.req) this.req.abort();
-		if (this.res) this.res.destroy();
+		if (this.res && this.res.destroy) this.res.destroy();
 	}
 });

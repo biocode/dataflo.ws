@@ -1,36 +1,19 @@
-var test     = require('utest');
-var assert   = require('assert');
-
 var util     = require ('util');
+var path     = require ('path');
 
-var common   = require ('../common');
-var flow = require ('../flow');
+var assert   = require ('assert');
 
-clearInterval ($stash.currentDateInterval);
+var df     = require ("../");
+var flow   = require ("../flow");
 
-var verbose = true;
+var baseName = path.basename (__filename, path.extname (__filename));
+
+var testCommon = require ("../test/common");
+testCommon.injectMain ();
 
 var tests = [];
 
-var failure = function (desc) {
-	return function () {
-		test (desc, {'failure test': function () {
-			if (verbose) console.log ('failure, ' + desc);
-			assert.equal (true, false);
-		}});
-	}
-}
-
-var ok = function (desc) {
-	return function () {
-		var tests = {};
-		tests[desc + 'ok test'] = function () {
-			if (verbose) console.log ('ok, ' + desc);
-			assert.equal (true, true);
-		};
-		test (desc, tests);
-	};
-}
+var verbose = false;
 
 //process.on('uncaughtException', failure ('unhadled exception'));
 
@@ -45,8 +28,8 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	completed: failure ('non-existent-task'),
-	failed: ok ('non-existent-task')
+	completed: false,
+	failed: true
 }, {
 	description: "one completed and one skipped task",
 	config: {
@@ -62,8 +45,22 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: failure ('complete + skipped task'),
-	completed: ok ('complete + skipped task')
+	failed: false,
+	completed: true
+}, {
+	description: "task without run method",
+	config: {
+		tasks: [{
+			className: "./test/task/002-task-methodless",
+			produce: "data.ok"
+		}, {
+			className: "./test/task/002-task-methodless",
+			method: "methodName",
+			produce: "data.skip"
+		}]
+	},
+	failed: false,
+	completed: true
 }, {
 	description: "two skipped tasks",
 	config: {
@@ -78,8 +75,8 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: failure ('skipped + skipped task'),
-	completed: ok ('skipped + skipped task')
+	failed: false,
+	completed: true
 }, {
 	description: "it's ok to skip some tasks if requirements not satisfied",
 	config: {
@@ -95,8 +92,8 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: failure ('complete + skipped by requirements task'),
-	completed: ok ('complete + skipped by requirements task')
+	failed: false,
+	completed: true
 }, {
 	description: "skipped important task",
 	config: {
@@ -113,8 +110,8 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: ok ('skipped important task'),
-	completed: failure ('skipped important task')
+	failed: true,
+	completed: false
 }, {
 	description: "important task decide itself fail or skip",
 	config: {
@@ -127,8 +124,8 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: ok ('failed itself important task'),
-	completed: failure ('failed itself important task')
+	failed: true,
+	completed: false
 }, {
 	description: "fail task",
 	config: {
@@ -140,8 +137,51 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: ok ('fail task'),
-	completed: failure ('fail task')
+	failed: true,
+	completed: false
+}, {
+	description: "no tasks",
+	config: {
+	},
+	request: {
+		test: true
+	},
+	failed: true,
+	completed: false
+}, {
+	description: "it is ok not to run anything when no importnat task is defined",
+	config: {
+		tasks: [{
+			className: "./test/task/002-ok-task",
+			if: "{$unexisting}",
+			produce: "data.ok"
+		}]
+	},
+	failed: false,
+	completed: true
+}, {
+	description: "flow unready because of absent requirements",
+	config: {
+		tasks: [{
+			className: "./test/task/002-ok-task",
+			important: true,
+			if: "{$unexisting}",
+			produce: "data.ok"
+		}]
+	},
+	failed: true,
+	completed: false
+}, {
+	description: "no task",
+	config: {
+		tasks: [{
+		}]
+	},
+	request: {
+		test: true
+	},
+	failed: true,
+	completed: false
 }, {
 	description: "fail task is skipped by requirements",
 	config: {
@@ -157,11 +197,124 @@ var dataflows = [{
 	request: {
 		test: true
 	},
-	failed: failure ('fail task'),
-	completed: ok ('fail task')
+	failed: true,
+	completed: false
+}, {
+	description: "data merge test",
+	// only: true,
+	config: {
+		tasks: [{
+			fn: "dfDataObject",
+			$args: {"a": "b"},
+			$mergeWith: "data"
+		}, {
+			fn: "dfDataObject",
+			$args: {"c": "d"},
+			$mergeWith: "data"
+		}, {
+			fn: "dfDataObject",
+			$mergeWith: "data"
+		}, {
+			fn: "console.log",
+			important: true,
+			$args: ["{$data.a}", "{$data.c}"],
+		}]
+	},
+	failed: false,
+	completed: true
+}, {
+	description: "empty data branch",
+	config: {
+		tasks: [{
+			task: "./test/task/002-ok-task",
+			method: "emptyMethod",
+			setOnEmpty: "empty"
+		}, {
+			fn: "console.log",
+			important: true,
+			$args: ["{$empty}"],
+		}]
+	},
+	failed: false,
+	completed: true
+
 //}, {
 
 }];
+
+describe (baseName + " running dataflow", function () {
+	dataflows.map (function (item) {
+
+		var method = it;
+
+		if (item.only) {
+			method = it.only;
+			verbose = true;
+		}
+
+		method (item.description, function (done) {
+
+			var df = new flow (
+				{
+					tasks: item.config.tasks,
+					logger: ("VERBOSE" in process.env) || verbose ? undefined : function () {}
+				}, {
+					request: item.request
+				}
+			);
+
+//			if (!df.ready) {
+//				console.log ("dataflow not ready");
+//				assert (item.failed === true);
+//				done ();
+//				return;
+//			}
+
+			function dfStatus (df) {
+				if (df.failed) {
+					console.log ("failed tasks:");
+					df.tasks.forEach (function (task, idx) {
+						if (task.state === 5) { // error
+							console.log (idx + ': ' + util.inspect (task.originalConfig));
+						}
+					});
+				}
+				if (verbose) console.log (df);
+				console.log ("flow data:");
+				delete (df.data.initiator);
+				delete (df.data.appMain);
+				delete (df.data.project);
+				console.log (util.inspect (df.data));
+			}
+
+			df.on ('completed', function () {
+				var passed = item.completed === true ? true : false;
+				if (!passed || verbose) dfStatus (df);
+				assert (passed);
+				done ();
+			});
+
+			df.on ('failed', function () {
+				var passed = item.failed === true ? true : false;
+				if (!passed || verbose) dfStatus (df);
+				assert (passed);
+				done ();
+			});
+
+			df.on ('exception', function () {
+				assert (item.exception === true);
+				done ();
+			});
+
+			if (item.autoRun || item.autoRun == void 0)
+				df.run();
+
+		});
+	});
+});
+
+
+return;
 
 var started = new Date ();
 
@@ -244,26 +397,6 @@ repeat.times (function () {
 
 	if (dependentConfig.autoRun || dependentConfig.autoRun == void 0)
 		dependentDf.run();
-
-
-	dataflows.map (function (item) {
-
-		var df = new flow (
-			util.extend (true, {}, item.config),
-			{request: item.request}
-		);
-
-		if (!df.ready)
-			return item.failed ();
-
-		df.on ('completed', item.completed);
-
-		df.on ('failed', item.failed);
-
-		if (item.autoRun || item.autoRun == void 0)
-			df.run();
-
-	});
 
 });
 

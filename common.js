@@ -1,5 +1,7 @@
 var util = require ('util');
 
+var confFu = require ('conf-fu');
+
 Object.PLATFORM_NATIVE_TYPES = {
 	// Buffer seems to be the only custom type in the Node core
 	'Buffer': true
@@ -33,37 +35,7 @@ Object.is = function (type, obj) {
 	return type == Object.typeOf(obj);
 };
 
-function isEmpty(obj) {
-	var type = Object.typeOf(obj);
-	return (
-		('Undefined' == type)                              ||
-		('Null'      == type)                              ||
-		('Boolean'   == type && false === obj)             ||
-		('Number'    == type && (0 === obj || isNaN(obj))) ||
-		('String'    == type && 0 == obj.length)           ||
-		('Array'     == type && 0 == obj.length)           ||
-		('Object'    == type && 0 == Object.keys(obj).length)
-	);
-}
-
-var Project;
-var projectRoot;
-var projectInstance;
-
-if (!util.inherits) {
-	util.inherits = function (ctor, superCtor) {
-		ctor.super_ = superCtor;
-		ctor.prototype = Object.create (superCtor.prototype, {
-			constructor: {
-			value: ctor,
-			enumerable: false,
-			writable: true,
-			configurable: true
-		}});
-	};
-	// http://stackoverflow.com/questions/13201775/looking-for-a-javascript-implementation-of-nodes-util-inherits
-	// B.prototype = Object.create(A.prototype);  B.prototype.constructor = B;
-}
+var isEmpty = confFu.isEmpty;
 
 if (!util.extend) {
 util.extend = function extend () {
@@ -88,7 +60,9 @@ util.extend = function extend () {
 		if (!obj || !Object.is('Object', obj) || obj.nodeType || obj.setInterval)
 			return false;
 		var has_own_constructor = hasOwnProperty.call(obj, "constructor");
-		var has_is_property_of_method = hasOwnProperty.call(obj.constructor.prototype, "isPrototypeOf");
+		var has_is_property_of_method;
+		if (obj.constructor)
+			has_is_property_of_method = hasOwnProperty.call(obj.constructor.prototype, "isPrototypeOf");
 		// Not own constructor property must be Object
 		if (obj.constructor && !has_own_constructor && !has_is_property_of_method)
 			return false;
@@ -157,53 +131,6 @@ if (!util.clone) {
 	}
 }
 
-try {
-	if (process.pid) {
-		global.$isClientSide = false;
-		global.$isServerSide = true;
-		global.$mainModule   = process.mainModule;
-		global.$scope        = 'process.mainModule';
-		global.$stash        = {};
-		global.$isPhoneGap   = false;
-		global.$global       = global;
-	} else {
-		throw 'WTF?';
-	}
-} catch (e) {
-	window.$isClientSide = true;
-	window.$isServerSide = false;
-	window.$mainModule   = window;
-	window.$scope        = 'window';
-	window.$stash        = {};
-	window.$global       = window;
-	try {
-		if (window.PhoneGap || window.Cordova || window.cordova) window.$isPhoneGap = true;
-	} catch (e) {
-		console.log (e);
-		window.$isPhoneGap = false;
-	}
-}
-
-Number.prototype.hours = Number.prototype.hour
-	= function () {return this * 60 * 60 * 1e3}
-Number.prototype.minutes = Number.prototype.minute
-	= function () {return this * 60 * 1e3}
-Number.prototype.seconds = Number.prototype.second
-	= function () {return this * 1e3}
-
-Number.prototype.times = function (cb) {
-	var a = [];
-	for (var i = 0; i < this; i++)
-		a[i] = cb (i);
-	return a;
-}
-
-// especially for stupid loaders
-if (0)
-	module.exports = {};
-
-module.exports.$global = $global;
-
 // overwrite subject with values from object (merge object with subject)
 var mergeObjects = module.exports.mergeObjects = function (object, subjectParent, subjectKey) {
 	// subject parent here for js's lack of pass by reference
@@ -217,7 +144,7 @@ var mergeObjects = module.exports.mergeObjects = function (object, subjectParent
 };
 
 var getByPath = module.exports.getByPath = function (path, origin) {
-	var value = origin || $global;
+	var value = origin;
 	var scope, key;
 	var validPath = path.split('.').every(function (prop) {
 		scope = value;
@@ -233,23 +160,7 @@ var getByPath = module.exports.getByPath = function (path, origin) {
 	return validPath && { value: value, scope: scope, key: key };
 };
 
-var pathToVal = module.exports.pathToVal = function (dict, path, value, method) {
-	var chunks = 'string' == typeof path ? path.split('.') : path;
-	var chunk = chunks[0];
-	var rest = chunks.slice(1);
-	if (chunks.length == 1) {
-		var oldValue = dict[chunk];
-		if (value !== undefined) {
-			if (method !== undefined) {
-				method(value, dict, chunk);
-			} else {
-				dict[chunk] = value;
-			}
-		}
-		return oldValue;
-	}
-	return pathToVal(dict[chunk], rest, value, method);
-};
+var pathToVal = module.exports.pathToVal = confFu.pathToVal;
 
 String.prototype.interpolate = function (dict, marks) {
 	if (!marks)
@@ -327,7 +238,7 @@ module.exports.waitAll = function waitAll (events, callback) {
 		var eventLogName = eventName + ' ' + event[2];
 		remaining.push (eventLogName);
 		if (typeof subject === "function") {
-			subject (_listener.bind ($global, eventLogName));
+			subject (_listener.bind (dataflows.global (), eventLogName));
 		} else {
 			if (subject.addEventListener) {
 				subject.addEventListener (eventName, _listener.bind (subject, eventLogName), false);
@@ -339,5 +250,66 @@ module.exports.waitAll = function waitAll (events, callback) {
 
 	});
 }
+
+function pad(n) {
+	return n < 10 ? '0' + n.toString(10) : n.toString(10);
+}
+
+function formattedDate (lowRes) {
+	var time = [
+		pad(lowRes.getHours()),
+		pad(lowRes.getMinutes()),
+		pad(lowRes.getSeconds())
+	].join(':');
+	var date = [
+		lowRes.getFullYear(),
+		pad(lowRes.getMonth() + 1),
+		pad(lowRes.getDate())
+	].join ('-');
+	return [date, time].join(' ')
+}
+
+
+// one second low resolution timer
+// test: http://jsperf.com/low-res-timer
+
+function lowResTimer () {
+	lowResTimer.refCount ++;
+	//	console.log ('low res timer refcount++', lowResTimer.refCount);
+	lowResTimer.dateString = formattedDate (
+		lowResTimer.date = new Date ()
+	);
+
+	lowResTimer.interval = setInterval (function () {
+		lowResTimer.dateString = formattedDate (
+			lowResTimer.date = new Date ()
+		);
+	}, 10);
+	// Probably bug in nodejs
+	if (lowResTimer.interval.unref)
+		lowResTimer.interval.unref();
+}
+
+lowResTimer.refCount = 0;
+
+lowResTimer.free = function () {
+	lowResTimer.refCount --;
+	//	console.log ('low res timer refcount--', lowResTimer.refCount);
+	if (lowResTimer.refCount < 1) {
+		delete lowResTimer.date;
+		delete lowResTimer.dateString;
+		clearInterval (lowResTimer.interval);
+	}
+}
+
+lowResTimer.getDateString = function () {
+	return lowResTimer.dateString || formattedDate (new Date ());
+}
+
+lowResTimer.getDate = function () {
+	return lowResTimer.date || new Date ();
+}
+
+module.exports.lowResTimer = lowResTimer;
 
 module.exports.isEmpty = isEmpty;

@@ -1,3 +1,6 @@
 .DS_Store
 .dataflows/instance
+.dataflows/*/fixup
 .brackets.json
+coverage
+node_modules

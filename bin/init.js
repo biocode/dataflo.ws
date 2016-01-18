@@ -4,6 +4,8 @@ var paint     = dataflows.color;
 var fs        = require ('fs');
 var path      = require ('path');
 
+var project = require ('dataflo.ws/project');
+
 module.exports = {
 	launchContext: function () {
 	},
@@ -62,14 +64,14 @@ module.exports = {
 				console.log (paint.dataflows(), 'initalizing project in ', paint.path (this.args._[0] || '.', '('+projectPath+')'));
 
 				var confDir      = path.resolve (projectPath, '.dataflows');
-				var instanceName = process.env.USER + '@' + process.env.HOSTNAME;
+				var instanceName = project.prototype.generatedInstance ();
 				var confFixup    = path.resolve (confDir, instanceName);
 
 				if (!fs.existsSync (confDir))
 					fs.mkdirSync (confDir);
 				// TODO: add detection of stub variables
-				if (!fs.existsSync (path.resolve (confDir, 'project')))
-				fs.writeFileSync (path.resolve (confDir, 'project'),
+				if (!fs.existsSync (path.resolve (confDir, 'project')) && !fs.existsSync (path.resolve (confDir, 'project.json')))
+				fs.writeFileSync (path.resolve (confDir, 'project.json'),
 					JSON.stringify (this.defaultConfig, null, "\t"), {flag: "wx"}
 				);
 
@@ -91,7 +93,7 @@ module.exports = {
 			return;
 		} else if (conf && !project.instance) {
 			var confDir      = project.configDir;
-			var instanceName = process.env.USER + '@' + process.env.HOSTNAME
+			var instanceName = project.prototype.generatedInstance ();
 			var confFixup    = path.resolve (confDir, instanceName);
 
 			fs.writeFileSync (

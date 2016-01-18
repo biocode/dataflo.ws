@@ -4,14 +4,15 @@ var MODULE_NAME = 'dataflo.ws';
 var INITIATOR_PATH = 'initiator';
 var DEFAULT_REQUIRE = 'main';
 
-var path      = require('path');
-var dataflows = require(MODULE_NAME);
+var dataflows = require('../');
 var common    = dataflows.common;
 var paint     = dataflows.color;
 
-var minimist  = require ('minimist');
+var path      = require('path');
 
-var $global   = common.$global;
+var minimist  = require ('commop/lib/minimist');
+
+var $global   = dataflows.global ();
 
 var Project = require (MODULE_NAME + '/project');
 
@@ -19,7 +20,7 @@ var project;
 
 common.getProject = function (rootPath) {
 	if (!project) {
-		project = new Project(rootPath);
+		project = new Project (rootPath);
 	}
 	return project;
 };
@@ -92,6 +93,8 @@ function launchScript (conf, err) {
 
 }
 
+var mainModule = dataflows.main ();
+
 project.on ('ready', function () {
 	var conf = project.config;
 
@@ -102,13 +105,13 @@ project.on ('ready', function () {
 	}
 
 	requires.forEach(function (modName) {
-		var mod = project.require(modName, true);
+		var mod = project.require (modName, true);
 
 		// exporting everything to mainModule,
 		// be careful about name conflicts
 		if (mod) {
 			Object.keys(mod).forEach(function (key) {
-				$global.$mainModule.exports[key] = mod[key];
+				mainModule[key] = mod[key];
 			});
 		} else {
 			// console.warn('Module %s not found', modName);
@@ -121,7 +124,7 @@ project.on ('ready', function () {
 	launchScript(conf);
 });
 
-project.on ('error', function (err) {
+project.on ('failed', function (err) {
 	// if (err === 'unpopulated variables')
 	// 	return;
 	// now we can launch script;

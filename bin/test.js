@@ -1,7 +1,7 @@
 var dataflows = require ('dataflo.ws');
 var paint     = dataflows.color;
 
-var minimist  = require ('minimist');
+var minimist  = require ('commop/lib/minimist');
 
 module.exports = {
 	launchContext: function () {
@@ -45,7 +45,8 @@ module.exports = {
 				+ (casesResult.fail.length === 0 ? '': ': ')
 				+ casesResult.fail.map (function (c) {return paint.error (c)}).join (', ')
 			);
-			process.kill();
+
+			// process.kill();
 		}
 
 		cases.forEach(function(token) {

@@ -4,11 +4,11 @@ var task   = require ('./base'),
 	util   = require ('util'),
 	stream = require('stream');
 
-// TODO: write a message 
+// TODO: write a message
 
 var presenters = {},
-	defaultTemplateDir = (project && project.config && project.config.templateDir) || 'share/presentation',
-	isWatched = (project && project.config && project.config.debug);
+	defaultTemplateDir = (typeof project !== "undefined" && project.config && project.config.templateDir) || 'share/presentation',
+	isWatched = (typeof project !== "undefined" && project.config && project.config.debug);
 
 /**
  * @class task.presenterTask
@@ -228,7 +228,18 @@ util.extend (presenterTask.prototype, {
 		if (!result) {
 			this.response.end();
 		} else if (result instanceof stream) {
-			result.pipe(this.response);
+			result.pipe (this.response);
+
+			result.on ('error', function (err) {
+				// console.log (err);
+				this.failed (err);
+			}.bind (this));
+
+			result.on ('close', function () {
+				this.completed();
+			}.bind (this));
+
+			return;
 		} else {
 			this.response.end(result);
 		}
@@ -251,7 +262,7 @@ util.extend (presenterTask.prototype, {
 		var self = this;
 
 		/**
-		 * @cfg {String} file (required) The template file name.
+		 * @cfg {String} file The template file name.
 		 */
 
 		/**
@@ -279,6 +290,20 @@ util.extend (presenterTask.prototype, {
 		 * Default values depend on the template {@link #type}.
 		 */
 
+		/**
+		 * @cfg {Object} headers http headers to send
+		 *
+		 */
+
+		/**
+		 * @cfg {String} code http status code to overrride current one
+		 *
+		 */
+
+		if (self.code) {
+			self.response.statusCode = self.code;
+		}
+
 		if (!self.type) {
 			if (self.file) {
 				// guess on file name
@@ -292,7 +317,7 @@ util.extend (presenterTask.prototype, {
 				// TODO: throw error in case of 2xx response code
 			}
 		}
-		
+
 		// TODO: lowercase all headers
 
 		switch (self.type.toLowerCase()) {
@@ -310,7 +335,7 @@ util.extend (presenterTask.prototype, {
 			case 'jade':
 			case 'mustache':
 			case 'handlebars':
-			
+
 				self.setContentType(self.headers['content-type'] || 'text/html; charset=utf-8');
 
 				self.renderCompile();
@@ -323,7 +348,7 @@ util.extend (presenterTask.prototype, {
 
 				self.renderCompile();
 				break;
-				
+
 			case 'json':
 				self.setContentType('application/json; charset=utf-8');
 				self.renderResult (
@@ -345,11 +370,11 @@ util.extend (presenterTask.prototype, {
 
 				var magic = new Magic(mmm.MAGIC_MIME_TYPE);
 				magic.detectFile(self.file, function(err, contentType) {
-				    if (err) throw err;
+					if (err) throw err;
 
-				    self.setContentType(contentType);
-				    var fileStream = fs.createReadStream(self.file);
-				    self.renderResult (fileStream);
+					self.setContentType(contentType);
+					var fileStream = fs.createReadStream(self.file);
+					self.renderResult (fileStream);
 				});
 
 				break;

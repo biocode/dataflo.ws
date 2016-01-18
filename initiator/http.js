@@ -31,7 +31,7 @@ try {
  *
  * Initiates HTTP server-related dataflows.
  */
-var httpdi = module.exports = function httpdIConstructor (config) {
+var httpdi = module.exports = function httpdIConstructor (config, flowOptions) {
 	// we need to launch httpd
 
 	this.host = config.host;
@@ -42,11 +42,19 @@ var httpdi = module.exports = function httpdIConstructor (config) {
 
 	this.flows  = config.workflows || config.dataflows || config.flows;
 
+	this.flowOptions = flowOptions || {};
+
 	// I don't want to serve static files by default
 	if (config.static) {
 		this.static = config.static === true ? {} : config.static;
 		// - change static root by path
-		this.static.root    = project.root.fileIO (this.static.root || 'www');
+		if (typeof project !== "undefined") {
+			this.static.root    = project.root.fileIO (this.static.root || 'www');
+		} else {
+			var io = require ('fsobject');
+			this.static.root    = new io (this.static.root || 'www');
+		}
+
 		this.static.index   = this.static.index || "index.html";
 		this.static.headers = this.static.headers || {};
 	}
@@ -62,42 +70,46 @@ var httpdi = module.exports = function httpdIConstructor (config) {
 		this.router = this.defaultRouter;
 	}
 
-	if (this.host  == "auto") {
-		this.detectIP (this.listen);
-	} else {
+	// TODO: use 0.0.0.0 instead of auto
+//	if (this.host  == "auto") {
+//		this.detectIP (this.listen);
+//	} else {
 		this.listen ();
-	}
+//	}
 
-	// - - - OS detected
-
-	this.win = (os.type() == 'Windows_NT');
+	return this;
 };
 
 util.inherits (httpdi, EventEmitter);
 
-httpdi.prototype.ready = function () {
+httpdi.connections = {};
+
+httpdi.prototype.started = function () {
 	// called from server listen
 	var listenHost = this.host ? this.host : '127.0.0.1';
-	var listenPort = this.port == 80 ? '' : ':'+this.port;
+	var listenPort = this.port === 80 ? '' : ':'+this.port;
 	console.log(
 		'http initiator running at',
 		paint.path (
 			'http://'+listenHost+listenPort+'/'
 		),
 		this.static
-			? "and serving static files from " + paint.path (project.root.relative (this.static.root))
+		? "and serving static files from " + paint.path (this.static.root.path) // project.root.relative (this.static.root)
 			: ""
 	);
 
-	this.emit ('ready', this.server);
+	httpdi.connections[this.host+":"+this.port] = this.server;
+
+	this.ready = true;
+
+	this.emit ('ready');
 };
 
-httpdi.prototype.runPrepare = function (df, request, response) {
+httpdi.prototype.runPrepare = function (df, request, response, prepareCfg) {
 
 	var self = this;
 
-	var prepareCfg = df.prepare,
-		prepare    = this.prepare;
+	var prepare    = this.prepare;
 
 	if (prepare) {
 
@@ -109,7 +121,8 @@ httpdi.prototype.runPrepare = function (df, request, response) {
 
 		prepareCfg.forEach(function(p, index, arr) {
 
-			var innerDfConfig = prepare[p];
+			var innerDfConfig = util.extend (true, {}, this.flowOptions);
+			util.extend (true, innerDfConfig, prepare[p]);
 
 			if (!innerDfConfig || !innerDfConfig.tasks) {
 				console.error (paint.error('request canceled:'), 'no prepare task named "'+p+'"');
@@ -118,21 +131,22 @@ httpdi.prototype.runPrepare = function (df, request, response) {
 				var presenter = self.createPresenter({}, request, response, 'failed');
 //				var presenter = self.createPresenter(cDF, 'failed');
 				if (presenter)
-					presenter.run ();
+					presenter.runDelayed ();
 				return;
 			}
+
+			innerDfConfig.stage = 'prepare';
 
 			innerDfConfig.idPrefix = df.coloredId + '>';
 
 			var innerDf = new flow(innerDfConfig, {
 				request: request,
-				response: response,
-				stage: 'prepare'}
-			);
+				response: response
+			});
 
 			dfChain.push(innerDf);
 
-		});
+		}.bind (this));
 
 		if (prepareFailure) {
 			return;
@@ -150,18 +164,18 @@ httpdi.prototype.runPrepare = function (df, request, response) {
 			currentDf.nextDf = dfChain[i+1];
 
 			currentDf.on('completed', function(cDF) {
-				setTimeout(cDF.nextDf.run.bind (cDF.nextDf), 0);
+				setTimeout(cDF.nextDf.runDelayed.bind (cDF.nextDf), 0);
 			});
 
 			currentDf.on('failed', function(cDF) {
 				var presenter = self.createPresenter(cDF, request, response, 'failed');
 				if (presenter)
-					presenter.run ();
+					presenter.runDelayed ();
 			});
 
 		}
 
-		dfChain[0].run();
+		dfChain[0].runDelayed();
 
 	} else {
 
@@ -247,6 +261,7 @@ httpdi.prototype.createPresenter = function (df, request, response, state) {
 				"presenter";
 			presenter.$important = true;
 		}
+
 		tasks.push (presenter);
 	}
 
@@ -259,7 +274,9 @@ httpdi.prototype.createPresenter = function (df, request, response, state) {
 	var presenterDf = new flow ({
 		id:    df.id,
 		tasks: tasks,
-		stage: 'presentation'
+		stage: 'presentation',
+		logger: this.flowOptions.logger,
+		verbose: this.flowOptions.verbose
 	}, reqParams);
 
 	presenterDf.on ('completed', function () {
@@ -294,17 +311,36 @@ httpdi.prototype.createFlow = function (cfg, req, res) {
 	}
 
 	// task MUST contain tasks or presenter
-	if (!cfg.tasks && !cfg.presenter)
-		return;
+	if (!cfg.tasks) {
+		if (!cfg.presenter) {
+			return;
+		}
 
-	try {
-		var df = new flow(
-			util.extend (true, {}, cfg),
-			{ request: req, response: res }
-		);
-	} catch (e) {
-		console.error ('dataflow failed', req.method, req.url.pathname);
-		throw e;
+		var df = {
+			//id:,
+			data: {},
+			//error: ,
+			presenter: cfg.presenter
+		};
+
+		var presenter = self.createPresenter(df, req, res, 'completed');
+		if (presenter) {
+			presenter.runDelayed ();
+			self.emit('detected', req, res, presenter);
+			return presenter;
+		}
+	}
+
+	var flowConfig = util.extend (true, {}, this.flowOptions);
+	util.extend (true, flowConfig, cfg);
+
+	var df = new flow(
+		flowConfig,
+		{ request: req, response: res }
+	);
+
+	if (cfg.presenter) {
+		df.presenter = cfg.presenter;
 	}
 
 	console.log ('dataflow', req.method, req.url.pathname, df.coloredId);
@@ -312,15 +348,14 @@ httpdi.prototype.createFlow = function (cfg, req, res) {
 	df.on('completed', function (df) {
 		var presenter = self.createPresenter(df, req, res, 'completed');
 		if (presenter) {
-			presenter.run ();
+			presenter.runDelayed ();
 		}
 	});
 
 	df.on('failed', function (df) {
-
 		var presenter = self.createPresenter(df, req, res, 'failed');
 		if (presenter) {
-			presenter.run ();
+			presenter.runDelayed ();
 		}
 
 	});
@@ -328,9 +363,9 @@ httpdi.prototype.createFlow = function (cfg, req, res) {
 	self.emit('detected', req, res, df);
 
 	if (cfg.prepare) {
-		self.runPrepare(df, req, res);
+		self.runPrepare(df, req, res, cfg.prepare);
 	} else {
-		df.run();
+		df.runDelayed();
 	}
 
 	return df;
@@ -351,11 +386,10 @@ httpdi.prototype.createFlowByCode = function (code, req, res) {
 	}
 	var codeDfConfig = this.flows._codeFlows[res.statusCode];
 	if (codeDfConfig) {
-		if (!codeDfConfig.tasks) { codeDfConfig.tasks = []; }
-		var df = this.createFlow(codeDfConfig, req, res);
+		var df = this.createFlow (codeDfConfig, req, res);
 		if (df) {
-			df.on ('completed', this.finishRequest.bind (this, res));
-			df.on ('failed',    this.finishRequest.bind (this, res));
+			// df.on ('completed', this.finishRequest.bind (this, res));
+			// df.on ('failed',    this.finishRequest.bind (this, res));
 			return true;
 		}
 	}
@@ -368,7 +402,7 @@ httpdi.prototype.initFlow = function (wfConfig, req) {
 };
 
 // hierarchical router
-// TODO: igzakt match + pathInfo
+// TODO: igzakt match
 // TODO: dirInfo, fileName, fileExtension, fullFileName
 httpdi.prototype.hierarchical = function (req, res) {
 	var pathName = req.url.pathname;
@@ -382,6 +416,7 @@ httpdi.prototype.hierarchical = function (req, res) {
 
 	var capture = [];
 	this.hierarchical.tree = this;
+	this.hierarchical.path = [];
 	var routeFinder = this.hierarchical.findByPath.bind (this.hierarchical);
 	if (memoize)
 		routeFinder = memoize (routeFinder);
@@ -389,9 +424,14 @@ httpdi.prototype.hierarchical = function (req, res) {
 		null, pathParts, 0, capture
 	);
 
+	var pathPartsRemains = pathParts.slice (this.hierarchical.checkedLevel + 1);
+
+	// console.log (this.hierarchical.path, this.hierarchical.checkedLevel, pathParts, pathPartsRemains);
+
 	if (config) {
 		req.capture = capture;
-		return this.createFlow(config, req, res);
+		req.pathInfo = pathPartsRemains.join ('/');
+		return this.createFlow (config, req, res);
 	}
 
 	return null;
@@ -421,44 +461,46 @@ httpdi.prototype.hierarchical.findByPath = function (
 	if (!tree)
 		tree = this.tree;
 	var list = tree.workflows || tree.dataflows || tree.flows;
-	var checkedLevel = level;
+	this.checkedLevel = level;
 	var branch = null;
 
 	// exact match
 	this.walkList(
 		list, pathParts, level,
 		function (tree, pathFragment, index) {
-			// console.print('PATH', tree.path, 'FRAGMENT', pathFragment);
+			// console.log ('PATH', tree.path, 'FRAGMENT', pathFragment);
 			if (tree.path == pathFragment) {
-				checkedLevel = index;
+				this.checkedLevel = index;
 				branch = tree;
+				this.path.push (tree.path);
 				return true;
 			}
 			return false;
-		}
+		}.bind (this)
 	);
 
 	// pattern match
 	!branch && this.walkList(
 		list, pathParts, level,
 		function (tree, pathFragment, index) {
-			// console.print('PATTERN', tree.pattern, 'FRAGMENT', pathFragment);
+			// console.log ('PATTERN', tree.pattern, 'FRAGMENT', pathFragment);
 			var match = tree.pattern && pathFragment.match(tree.pattern);
 			if (match) {
-				checkedLevel = index;
+				this.checkedLevel = index;
 				branch = tree;
 				capture.push.apply(capture, match.slice(1));
+				this.path.push (tree.path);
 				return true;
 			}
 			return false;
-		}
+		}.bind (this)
 	);
 
-	if ((branch && branch.static && checkedLevel >= 0) || checkedLevel >= pathParts.length - 1) {
+	if ((branch && branch.static && this.checkedLevel >= 0) || this.checkedLevel >= pathParts.length - 1) {
 		return branch;
 	} else {
 		return branch && this.findByPath(
-			branch, pathParts, checkedLevel + 1, capture
+			branch, pathParts, this.checkedLevel + 1, capture
 		);
 	}
 };
@@ -518,11 +560,7 @@ httpdi.prototype.handleStatic = function (req, res) {
 
 	var isIndex  = /\/$/.test(req.url.pathname) ? self.static.index : '';
 
-	var pathName = path.join (
-		self.static.root.path,
-		path.join('.', req.url.pathname),
-		isIndex
-	);
+	var fileObject = self.static.root.fileIO (req.url.pathname.substr (1), isIndex);
 
 	console.log ('filesys ', req.method, req.url.pathname, isIndex ? '=> '+ isIndex : '');
 
@@ -532,19 +570,20 @@ httpdi.prototype.handleStatic = function (req, res) {
 	// 	contentType = 'text/html';
 	// 	charset = 'utf-8';
 	// } else
+	// TODO: maybe use extension based mapping, mime is slow because we need to read
+	// and analyze magic numbers
 	if (mime && mime.lookup) {
-		contentType = mime.lookup (pathName);
+		contentType = mime.lookup (fileObject.path);
 		// The logic for charset lookups is pretty rudimentary.
 		if (contentType.match (/^text\//))
 			charset = mime.charsets.lookup(contentType, 'utf-8');
 		if (charset) contentType += '; charset='+charset;
 	} else if (!contentType) {
 		console.error(
-			'sorry, there is no content type for %s', pathName
+			'sorry, there is no content type for %s', fileObject.path
 		);
 	}
 
-	var file = project.root.fileIO(pathName);
 	var fileOptions = {flags: "r"};
 
 	var statusCode = 200;
@@ -574,7 +613,7 @@ httpdi.prototype.handleStatic = function (req, res) {
 		}
 	}
 
-	file.readStream (fileOptions, function (readStream, stats) {
+	fileObject.readStream (fileOptions, function (readStream, stats) {
 
 		if (!stats) {
 			self.createFlowByCode (404, req, res);
@@ -605,7 +644,7 @@ httpdi.prototype.handleStatic = function (req, res) {
 				'Date': self.httpDate (stats.mtime),
 			};
 
-			if (project.config.debug) {
+			if (typeof project !== "undefined" && project.config.debug) {
 				headersExtend['Cache-Control'] = 'no-store, no-cache';
 			}
 
@@ -660,7 +699,7 @@ httpdi.prototype.listen = function () {
 	}
 
 	listenArgs.push (function () {
-		self.ready ();
+		self.started ();
 	});
 
 	this.server.listen.apply (this.server, listenArgs);
